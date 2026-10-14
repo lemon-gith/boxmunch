@@ -5,8 +5,9 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from boxmunge.commands.add_git_project_cmd import (
-    cmd_add_git_project, run_add_git_project,
+    cmd_add_git_project, run_add_git_project, validate_ref, validate_repo_url,
 )
+from boxmunge.fileutil import project_lock
 from boxmunge.log import _reset_logger
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -76,6 +77,98 @@ class TestRunAddGitProject:
             "testapp", "git@github.com:org/testapp.git", paths
         )
         assert result == 1
+
+
+class TestRepoUrlValidation:
+    @pytest.mark.parametrize("url", [
+        "https://github.com/org/repo.git",
+        "https://gitlab.com/group/sub/repo",
+        "ssh://git@github.com/org/repo.git",
+        "git@github.com:org/repo.git",
+    ])
+    def test_accepts_remote_urls(self, url: str) -> None:
+        assert validate_repo_url(url) is None
+
+    @pytest.mark.parametrize("url", [
+        "",
+        "-u",
+        "--upload-pack=touch /tmp/x",
+        "file:///opt/boxmunge/projects/other/repo",
+        "/opt/boxmunge/projects/other/repo",
+        "../other/repo",
+        "~/repo",
+        "ext::sh -c 'id'",
+        "fd::17/foo",
+        "git://github.com/org/repo.git",
+        "http://github.com/org/repo.git",
+        "github.com:org/repo.git",
+        "https://github.com/org/repo .git",
+        "https://github.com/org/repo\n",
+    ])
+    def test_rejects_unsafe_urls(self, url: str) -> None:
+        assert validate_repo_url(url) is not None
+
+    @pytest.mark.parametrize("ref", ["-x", "--upload-pack=x", "", "a b"])
+    def test_rejects_bad_refs(self, ref: str) -> None:
+        assert validate_ref(ref) is not None
+
+    @pytest.mark.parametrize("ref", ["main", "v1.2.3", "feature/x"])
+    def test_accepts_good_refs(self, ref: str) -> None:
+        assert validate_ref(ref) is None
+
+
+class TestRunAddGitProjectHardening:
+    @pytest.mark.parametrize("name", ["../evil", "Evil", "a/b", "", "-x"])
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_rejects_invalid_project_name(
+        self, mock_run: MagicMock, name: str, paths: BoxPaths,
+    ) -> None:
+        result = run_add_git_project(name, "https://github.com/o/r.git", paths)
+        assert result == 2
+        mock_run.assert_not_called()
+
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_rejects_option_like_url_without_cloning(
+        self, mock_run: MagicMock, paths: BoxPaths,
+    ) -> None:
+        assert run_add_git_project("testapp", "-u", paths) == 2
+        assert run_add_git_project(
+            "testapp", "file:///etc", paths) == 2
+        mock_run.assert_not_called()
+        assert not paths.project_dir("testapp").exists()
+
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_rejects_option_like_ref(
+        self, mock_run: MagicMock, paths: BoxPaths,
+    ) -> None:
+        result = run_add_git_project(
+            "testapp", "https://github.com/o/r.git", paths, ref="--upload-pack=x")
+        assert result == 2
+        mock_run.assert_not_called()
+
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_clone_uses_double_dash_and_protocol_allowlist(
+        self, mock_run: MagicMock, paths: BoxPaths,
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        # Clone "succeeds" but writes no manifest, so the run fails afterwards;
+        # we only care how git was invoked.
+        run_add_git_project("testapp", "https://github.com/o/r.git", paths)
+        cmd = mock_run.call_args.args[0]
+        assert cmd[:2] == ["git", "clone"]
+        assert cmd[-3] == "--"
+        assert cmd[-2] == "https://github.com/o/r.git"
+        assert mock_run.call_args.kwargs["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh"
+
+    @patch("boxmunge.commands.add_git_project_cmd.subprocess.run")
+    def test_fails_fast_when_project_lock_held(
+        self, mock_run: MagicMock, paths: BoxPaths,
+    ) -> None:
+        with project_lock("testapp", paths):
+            result = run_add_git_project(
+                "testapp", "https://github.com/o/r.git", paths)
+        assert result == 1
+        mock_run.assert_not_called()
 
 
 class TestAddGitProjectLogging:

@@ -73,6 +73,10 @@ For projects hosted in a git repository.
    add-git-project myapp https://github.com/example/myapp.git
    ```
 
+   The repo URL must be `https://`, `ssh://` or `user@host:path`; local
+   paths, `file://` and other schemes are rejected. The project name must
+   be lowercase alphanumeric with hyphens.
+
 2. Stage or deploy:
 
    ```
